@@ -1,0 +1,14 @@
+{
+  "websites": [
+    "bbc.com",
+    "csmonitor.com",
+    "forbes.com",
+    "newsnationnow.com",
+    "newsweek.com",
+    "reason.com",
+    "reuters.com",
+    "thehill.com",
+    "wsj.com"
+  ],
+  "description": "List of reputable news sources for bias detection analysis"
+}

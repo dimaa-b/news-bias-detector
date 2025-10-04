@@ -1,4 +1,5 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 from dotenv import load_dotenv
 import json
@@ -27,44 +28,41 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY not found in environment variables or parameters")
         
-        # Configure the API
-        genai.configure(api_key=self.api_key)
+        # Initialize the client
+        self.client = genai.Client(api_key=self.api_key)
         
-        # Initialize the model
+        # Store the model name
         self.model_name = model_name
-        self.model = genai.GenerativeModel(model_name)
         
         # Set up logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
         
         # Generation configuration
-        self.generation_config = {
-            'temperature': 0.7,
-            'top_p': 0.95,
-            'top_k': 40,
-            'max_output_tokens': 8192,
-        }
-        
-        # Safety settings
-        self.safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-        ]
+        self.generation_config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=65536,
+            safety_settings=[
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                ),
+            ]
+        )
     
     def generate_text(self, prompt: str, **kwargs) -> Dict[str, Any]:
         """
@@ -78,23 +76,57 @@ class GeminiClient:
             dict: Response containing generated text and metadata
         """
         try:
-            # Merge custom config with defaults
-            config = {**self.generation_config, **kwargs}
+            # Create config with custom parameters
+            config_params = {
+                'temperature': kwargs.get('temperature', 0.7),
+                'top_p': kwargs.get('top_p', 0.95),
+                'top_k': kwargs.get('top_k', 40),
+                'max_output_tokens': kwargs.get('max_output_tokens', 65536),
+                'safety_settings': self.generation_config.safety_settings
+            }
+            
+            config = types.GenerateContentConfig(**config_params)
             
             # Generate content
-            response = self.model.generate_content(
-                prompt,
-                generation_config=config,
-                safety_settings=self.safety_settings
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config
             )
+            
+            # Extract text from response
+            text = None
+            if hasattr(response, 'text'):
+                text = response.text
+            elif hasattr(response, 'candidates') and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    parts = candidate.content.parts
+                    if len(parts) > 0 and hasattr(parts[0], 'text'):
+                        text = parts[0].text
+            
+            # Check finish reason for truncation
+            finish_reason = None
+            if hasattr(response, 'candidates') and len(response.candidates) > 0:
+                if hasattr(response.candidates[0], 'finish_reason'):
+                    finish_reason = str(response.candidates[0].finish_reason)
+            
+            if text is None:
+                error_msg = f"No text found in response. Response type: {type(response)}"
+                if finish_reason:
+                    error_msg += f", Finish reason: {finish_reason}"
+                if finish_reason == 'FinishReason.MAX_TOKENS' or 'MAX_TOKENS' in str(finish_reason):
+                    error_msg += ". Try increasing max_output_tokens or using a model with larger context."
+                raise ValueError(error_msg)
             
             return {
                 'success': True,
-                'text': response.text,
+                'text': text,
                 'prompt_tokens': response.usage_metadata.prompt_token_count if hasattr(response, 'usage_metadata') else None,
                 'completion_tokens': response.usage_metadata.candidates_token_count if hasattr(response, 'usage_metadata') else None,
                 'total_tokens': response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else None,
-                'model': self.model_name
+                'model': self.model_name,
+                'finish_reason': finish_reason
             }
             
         except Exception as error:
@@ -245,10 +277,40 @@ REFERENCES_JSON:
 
         try:
             # Use lower temperature for more consistent structured output
-            response = self.generate_text(prompt, temperature=0.2, max_output_tokens=8192)
+            # Use higher max_output_tokens for large analysis responses
+            response = self.generate_text(prompt, temperature=0.2, max_output_tokens=65536)
             
             if not response['success']:
                 return response
+            
+            # Check if text exists
+            if response.get('text') is None:
+                return {
+                    'success': False,
+                    'error': 'Response text is None',
+                    'raw_response': str(response)
+                }
+            
+            # Log token usage for debugging
+            total_tokens = response.get('total_tokens')
+            prompt_tokens = response.get('prompt_tokens')
+            completion_tokens = response.get('completion_tokens')
+            finish_reason = response.get('finish_reason', 'UNKNOWN')
+            self.logger.info(f"Token usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}, Finish: {finish_reason}")
+            
+            # Check if response was truncated due to max tokens
+            if 'MAX_TOKENS' in str(finish_reason):
+                self.logger.error(f"Response was truncated! Finish reason: {finish_reason}")
+                return {
+                    'success': False,
+                    'error': f'Response truncated due to MAX_TOKENS. Used {completion_tokens} output tokens. The article or references may be too long. Try using fewer or shorter reference articles.',
+                    'raw_response': response.get('text', ''),
+                    'tokens_used': total_tokens
+                }
+            
+            # Check if we're close to max tokens (might indicate truncation)
+            if completion_tokens and completion_tokens >= 64000:
+                self.logger.warning(f"Response used {completion_tokens} completion tokens, very close to the 65536 limit.")
             
             # Try to parse JSON from response
             text = response['text'].strip()
@@ -271,11 +333,28 @@ REFERENCES_JSON:
                 }
             except json.JSONDecodeError as e:
                 # If JSON parsing fails, return error with details
+                self.logger.error(f"JSON parsing failed at line {e.lineno}, column {e.colno}")
+                self.logger.error(f"Error: {e.msg}")
+                # Log a snippet around the error location
+                lines = text.split('\n')
+                if e.lineno <= len(lines):
+                    start = max(0, e.lineno - 3)
+                    end = min(len(lines), e.lineno + 2)
+                    self.logger.error(f"Context around error (lines {start+1}-{end+1}):")
+                    for i in range(start, end):
+                        marker = " >>> " if i == e.lineno - 1 else "     "
+                        self.logger.error(f"{marker}{i+1}: {lines[i]}")
+                
                 return {
                     'success': False,
                     'error': f'Failed to parse JSON response: {str(e)}',
                     'raw_response': response['text'],
-                    'tokens_used': response.get('total_tokens')
+                    'tokens_used': response.get('total_tokens'),
+                    'json_error_details': {
+                        'line': e.lineno,
+                        'column': e.colno,
+                        'message': e.msg
+                    }
                 }
                 
         except Exception as error:

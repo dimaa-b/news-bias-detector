@@ -142,20 +142,14 @@ class ApifyNewsClient:
 
         # Merge default input with provided search parameters
         input_data = {**default_input, **search_params}
-
-        print('Starting Apify actor run...')
         
         try:
             # Run the Actor and wait for it to finish - correct API usage
             run = self.client.actor(self.actor_id).call(run_input=input_data)
 
-            print('Actor run completed. Fetching results...')
-
             # Fetch and return Actor results from the run's dataset
             dataset_items = self.client.dataset(run['defaultDatasetId']).list_items()
             items = dataset_items.items
-            
-            print(f'Retrieved {len(items)} items from dataset')
             
             return items
 

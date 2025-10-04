@@ -255,9 +255,8 @@ def search_and_fetch():
         # Get search query (default to the Sean Combs query if not provided)
         query = data.get('query', 'Sean Combs Sentenced to More Than 4 Years in Prison After Apologizing for \'Sick\' Conduct')
         max_results = data.get('maxResults', 10)
-        max_articles_to_fetch = data.get('maxArticlesToFetch', 5)  # Limit how many to fetch with Newspaper3k
-        
-        print(f"Searching for: {query}")
+        max_articles_to_fetch = data.get('maxArticlesToFetch', 5) 
+        save_to_file = data.get('saveToFile', True)  # Default to saving
         
         # Step 1: Search using Apify
         search_params = {
@@ -274,8 +273,6 @@ def search_and_fetch():
                 'message': 'No search results found',
                 'query': query
             }), 404
-        
-        print(f"Found {len(apify_results)} search results")
         
         # Step 2: Extract URLs from search results
         urls = []
@@ -294,14 +291,11 @@ def search_and_fetch():
                 'search_results': apify_results
             }), 400
         
-        print(f"Extracted {len(urls)} URLs to fetch")
-        
         # Step 3: Fetch articles using Newspaper3k
         fetched_articles = []
         failed_articles = []
         
         for url in urls:
-            print(f"Fetching article from: {url}")
             article_data = newspaper_client.fetch_article(url)
             
             if article_data.get('success', False):
@@ -309,10 +303,11 @@ def search_and_fetch():
             else:
                 failed_articles.append(article_data)
         
-        # Step 4: Return combined results
-        return jsonify({
+        # Step 4: Prepare results
+        results = {
             'success': True,
             'query': query,
+            'timestamp': datetime.now().isoformat(),
             'search_results_count': len(apify_results),
             'urls_extracted': len(urls),
             'articles_fetched': len(fetched_articles),
@@ -326,7 +321,29 @@ def search_and_fetch():
                 'successfully_fetched': len(fetched_articles),
                 'failed_to_fetch': len(failed_articles)
             }
-        })
+        }
+        
+        # Step 5: Save to file if requested
+        if save_to_file:
+            import json
+            
+            # Create output directory if it doesn't exist
+            output_dir = 'output'
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            safe_query = query.replace(' ', '_').replace('/', '_')[:50]  # Sanitize query for filename
+            filename = f"{output_dir}/search_results_{safe_query}_{timestamp}.json"
+            
+            # Save to file
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
+            
+            results['saved_to_file'] = filename
+        
+        return jsonify(results)
 
     except Exception as error:
         print(f'Error in search and fetch: {error}')

@@ -44,8 +44,6 @@ class NewspaperClient:
             if not self._is_valid_url(url):
                 raise ValueError(f"Invalid URL: {url}")
             
-            self.logger.info(f"Fetching article from: {url}")
-            
             # Create article object
             article = Article(url, config=self.config)
             
@@ -57,7 +55,7 @@ class NewspaperClient:
             try:
                 article.nlp()
             except Exception as nlp_error:
-                self.logger.warning(f"NLP processing failed for {url}: {nlp_error}")
+                pass  # NLP errors are non-critical
             
             # Extract article data
             article_data = {
@@ -82,11 +80,9 @@ class NewspaperClient:
                 'success': True
             }
             
-            self.logger.info(f"Successfully fetched article: {article.title[:50]}...")
             return article_data
             
         except Exception as error:
-            self.logger.error(f"Error fetching article from {url}: {error}")
             return {
                 'url': url,
                 'error': str(error),
@@ -110,7 +106,6 @@ class NewspaperClient:
             article_data = self.fetch_article(url)
             articles.append(article_data)
         
-        self.logger.info(f"Fetched {len(articles)} articles")
         return articles
     
     def get_article_for_bias_analysis(self, url):

@@ -28,4 +28,5 @@ urllib3==2.5.0
 Werkzeug==2.3.
 newspaper3k==0.2.8
 lxml==4.9.3
+lxml_html_clean==0.4.3
 Pillow==10.0.1

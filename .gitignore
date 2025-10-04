@@ -1,4 +1,10 @@
 /node_modules
-.venv
-.env.example
 .env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+output/
+*.json

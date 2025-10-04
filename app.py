@@ -3,9 +3,45 @@ from datetime import datetime
 import os
 from apify_news_client import apify_news_client
 from newspaper_client import newspaper_client
+from google import genai
+from pinecone import Pinecone, ServerlessSpec
+
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_TOKEN")
+EMBEDDING_MODEL = "gemini-embedding-001"
+PINECONE_DIMENSIONS = 3072
+PINECONE_INDEX_NAME = "news-article-index"
+
+try:
+    pc = Pinecone(api_key = PINECONE_API_KEY)
+    genai.configure(api_key = GEMINI_API_KEY)
+    pinecone_index = pc.index(PINECONE_INDEX_NAME)
+    print('everything worked initalized gang')
+except Exception as e:
+    print(f'error initializing clients: {e}')
+    pinecone_index = None
 
 app = Flask(__name__)
 
+def get_embeddings(text : str):
+    """
+    Generates vector embedding for given text, returns dictionary with data or error
+    """
+    # intialize the gemini embeddings client
+    client = genai.client()
+    try:
+        result = client.models.embed_content(
+            model = EMBEDDING_MODEL,
+            contents = text,
+            task_type = "RETRIVAL_QUERY"
+        )
+        return {'success' : True, 'embedding': result['embedding']}
+    except Exception as e:
+        return {'success': False, 'error' : f'failed to generate embedding: {e}'}
+    
+
+    
 @app.route('/', methods=['GET'])
 def home():
     """Basic route"""

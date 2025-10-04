@@ -1,0 +1,9 @@
+/* Content script styles */
+
+.bias-detector-highlight {
+  transition: background-color 0.2s ease;
+}
+
+.bias-detector-highlight:hover {
+  filter: brightness(0.9);
+}

@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>News Bias Detector</title>
+  <style>
+    body {
+      width: 400px;
+      padding: 20px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+    }
+    
+    h1 {
+      font-size: 20px;
+      margin: 0 0 15px 0;
+      color: #333;
+    }
+    
+    .status {
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+    
+    .status.info {
+      background: #e3f2fd;
+      color: #1976d2;
+    }
+    
+    .status.success {
+      background: #e8f5e9;
+      color: #388e3c;
+    }
+    
+    .status.error {
+      background: #ffebee;
+      color: #c62828;
+    }
+    
+    .status.warning {
+      background: #fff3e0;
+      color: #f57c00;
+    }
+    
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #1976d2;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      font-size: 14px;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    
+    button:hover {
+      background: #1565c0;
+    }
+    
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    .settings {
+      margin-top: 15px;
+      padding-top: 15px;
+      border-top: 1px solid #ddd;
+    }
+    
+    .settings label {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #666;
+    }
+    
+    .settings input {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    
+    .results {
+      margin-top: 15px;
+      font-size: 13px;
+    }
+    
+    .result-item {
+      margin-bottom: 10px;
+      padding: 8px;
+      background: #f5f5f5;
+      border-radius: 4px;
+    }
+    
+    .result-label {
+      font-weight: bold;
+      color: #555;
+    }
+    
+    .verdict-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-left: 5px;
+    }
+    
+    .verdict-supported { background: #4caf50; color: white; }
+    .verdict-contradicted { background: #f44336; color: white; }
+    .verdict-unverifiable { background: #ff9800; color: white; }
+    .verdict-misleading { background: #ff5722; color: white; }
+    .verdict-no-claim { background: #9e9e9e; color: white; }
+    
+    .loading {
+      text-align: center;
+      padding: 20px;
+    }
+    
+    .spinner {
+      border: 3px solid #f3f3f3;
+      border-top: 3px solid #1976d2;
+      border-radius: 50%;
+      width: 30px;
+      height: 30px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .legend {
+      margin-top: 15px;
+      padding: 10px;
+      background: #f9f9f9;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+    
+    .legend h3 {
+      margin: 0 0 8px 0;
+      font-size: 13px;
+      color: #555;
+    }
+    
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    
+    .legend-color {
+      width: 15px;
+      height: 15px;
+      border-radius: 3px;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🔍 News Bias Detector</h1>
+  
+  <div id="status" class="status info">
+    Ready to analyze article
+  </div>
+  
+  <button id="analyzeBtn">Analyze This Article</button>
+  <button id="clearBtn" style="background: #757575;">Clear Highlights</button>
+  
+  <div id="results" class="results" style="display: none;"></div>
+  
+  <div class="legend" id="legend" style="display: none;">
+    <h3>Highlight Legend:</h3>
+    <div class="legend-item">
+      <div class="legend-color" style="background: rgba(76, 175, 80, 0.3);"></div>
+      <span>Supported</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background: rgba(244, 67, 54, 0.3);"></div>
+      <span>Contradicted</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background: rgba(255, 152, 0, 0.3);"></div>
+      <span>Unverifiable</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background: rgba(255, 87, 34, 0.3);"></div>
+      <span>Misleading</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background: rgba(158, 158, 158, 0.2);"></div>
+      <span>No Claim</span>
+    </div>
+  </div>
+  
+  <div class="settings">
+    <label>
+      Backend API URL:
+      <input type="text" id="apiUrl" value="http://localhost:3000/api/search-and-fetch">
+    </label>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

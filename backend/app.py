@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 from apify_news_client import apify_news_client
 from newspaper_client import newspaper_client
+from gemini_client import analyze_claims_simple
 
 app = Flask(__name__)
 
@@ -252,11 +253,56 @@ def search_and_fetch():
     try:
         data = request.get_json() if request.get_json() else {}
         
+        # Print received data to console
+        print('\n' + '='*80)
+        print('📥 RECEIVED DATA FROM EXTENSION')
+        print('='*80)
+        
+        # Get target article from extension (optional - if not provided, use first search result)
+        target_article_data = data.get('targetArticle')  # {title, text, url, date}
+        
+        if target_article_data:
+            print('\n🎯 TARGET ARTICLE:')
+            print(f'  Title: {target_article_data.get("title", "N/A")}')
+            print(f'  URL: {target_article_data.get("url", "N/A")}')
+            print(f'  Date: {target_article_data.get("date", "N/A")}')
+            print(f'  Text Length: {len(target_article_data.get("text", ""))} characters')
+            print(f'\n  First 200 chars of text:')
+            print(f'  {target_article_data.get("text", "")[:200]}...')
+        else:
+            print('\n⚠️  No target article provided in request')
+        
         # Get search query (default to the Sean Combs query if not provided)
-        query = data.get('query', 'Sean Combs Sentenced to More Than 4 Years in Prison After Apologizing for \'Sick\' Conduct')
+        base_query = data.get('query', 'Sean Combs Sentenced to More Than 4 Years in Prison After Apologizing for \'Sick\' Conduct')
         max_results = data.get('maxResults', 10)
-        max_articles_to_fetch = data.get('maxArticlesToFetch', 5) 
+        max_articles_to_fetch = data.get('maxArticlesToFetch', 10) 
         save_to_file = data.get('saveToFile', True)  # Default to saving
+        use_reputable_sources = data.get('useReputableSources', True)  # Default to using reputable sources
+        
+        print(f'\n🔍 SEARCH PARAMETERS:')
+        print(f'  Query: {base_query}')
+        print(f'  Max Results: {max_results}')
+        print(f'  Max to Fetch: {max_articles_to_fetch}')
+        print(f'  Use Reputable Sources: {use_reputable_sources}')
+        print(f'  Save to File: {save_to_file}')
+        print('='*80 + '\n')
+        
+        # Load reputable sources and construct site-specific query
+        query = base_query
+        if use_reputable_sources:
+            try:
+                import json
+                with open('reputable_sources.json', 'r') as f:
+                    sources_data = json.load(f)
+                    websites = sources_data.get('websites', [])
+                
+                if websites:
+                    # Construct the site query: query site:site1.com OR site:site2.com
+                    site_query = ' OR '.join([f'site:{site}' for site in websites])
+                    query = f'{base_query} {site_query}'
+            except Exception as e:
+                print(f'Warning: Could not load reputable sources: {e}')
+                # Continue with original query if file loading fails
         
         # Step 1: Search using Apify
         search_params = {
@@ -306,7 +352,9 @@ def search_and_fetch():
         # Step 4: Prepare results
         results = {
             'success': True,
-            'query': query,
+            'original_query': base_query,
+            'google_search_query': query,
+            'used_reputable_sources': use_reputable_sources,
             'timestamp': datetime.now().isoformat(),
             'search_results_count': len(apify_results),
             'urls_extracted': len(urls),
@@ -315,7 +363,9 @@ def search_and_fetch():
             'articles': fetched_articles,
             'failed': failed_articles,
             'summary': {
-                'query': query,
+                'original_query': base_query,
+                'google_search_query': query,
+                'used_reputable_sources': use_reputable_sources,
                 'total_search_results': len(apify_results),
                 'urls_found': len(urls),
                 'successfully_fetched': len(fetched_articles),
@@ -323,7 +373,113 @@ def search_and_fetch():
             }
         }
         
-        # Step 5: Save to file if requested
+        # Step 5: Analyze claims using Gemini (target from extension, all fetched articles as references)
+        if target_article_data and len(fetched_articles) >= 1:
+            print(f'\n=== STEP 5: ANALYZING CLAIMS WITH GEMINI ===')
+            print(f'Using provided target article from extension')
+            
+            # Use the provided target article
+            target_title = target_article_data.get('title', 'Untitled')
+            target_text = target_article_data.get('text', '')
+            target_date = target_article_data.get('date', 'Unknown')
+            target_url = target_article_data.get('url', 'Unknown')
+            
+            # ALL fetched articles become references
+            reference_articles = fetched_articles
+            
+            print(f'Target Article: {target_title[:60]}...')
+            print(f'Target URL: {target_url}')
+            print(f'Reference Articles: {len(reference_articles)}')
+            
+            # Prepare references for Gemini
+            references = []
+            for ref in reference_articles:
+                references.append({
+                    'title': ref.get('title', 'Untitled'),
+                    'text': ref.get('text', ''),
+                    'date': ref.get('publish_date'),
+                    'url': ref.get('url')
+                })
+            
+            # Run claims analysis
+            claims_result = analyze_claims_simple(
+                target_title=target_title,
+                target_text=target_text,
+                references=references,
+                target_date=target_date
+            )
+            
+            if claims_result.get('success'):
+                print(f'\n✅ CLAIMS ANALYSIS COMPLETED')
+                analysis = claims_result['analysis']
+                
+                # Print summary
+                print(f'\n📊 ANALYSIS SUMMARY:')
+                print(f'Target: {analysis["document_metadata"]["target_title"]}')
+                print(f'References Used: {len(analysis["document_metadata"]["references_used"])}')
+                print(f'Sentences Analyzed: {len(analysis["sentence_reviews"])}')
+                
+                # Print verdict counts
+                print(f'\n📈 VERDICT COUNTS:')
+                for verdict, count in analysis['pattern_summary']['counts_by_verdict'].items():
+                    print(f'  {verdict}: {count}')
+                
+                # Print overall assessment
+                print(f'\n🎯 OVERALL ASSESSMENT:')
+                print(f'Misleading Risk Score: {analysis["overall_assessment"]["misleading_risk_score"]}/100')
+                print(f'Summary: {analysis["overall_assessment"]["summary"][:200]}...')
+                
+                # Print top issues
+                if analysis['pattern_summary']['top_recurring_patterns']:
+                    print(f'\n⚠️  TOP ISSUES:')
+                    for pattern in analysis['pattern_summary']['top_recurring_patterns'][:3]:
+                        print(f'  - {pattern["pattern"]}: {pattern["instances"]} instances')
+                
+                # Print suggested corrections
+                if analysis.get('suggested_corrections'):
+                    print(f'\n💡 SUGGESTED CORRECTIONS: {len(analysis["suggested_corrections"])}')
+                    for correction in analysis['suggested_corrections'][:3]:
+                        print(f'  Sentence {correction["sentence_index"]}: {correction["problem"]}')
+                
+                # Add to results
+                results['claims_analysis'] = claims_result
+                results['target_article'] = {
+                    'title': target_title,
+                    'url': target_url,
+                    'date': target_date
+                }
+                print(f'\n✅ Claims analysis added to response')
+            else:
+                print(f'\n❌ CLAIMS ANALYSIS FAILED: {claims_result.get("error")}')
+                results['claims_analysis'] = {
+                    'success': False,
+                    'error': claims_result.get('error'),
+                    'message': 'Failed to analyze claims with Gemini'
+                }
+                results['target_article'] = {
+                    'title': target_title,
+                    'url': target_url,
+                    'date': target_date
+                }
+        elif not target_article_data:
+            print(f'\n⚠️  SKIPPING CLAIMS ANALYSIS: No target article provided in request')
+            results['claims_analysis'] = {
+                'success': False,
+                'message': 'No target article provided. Include "targetArticle" with title, text, url, and date in request.'
+            }
+        else:
+            print(f'\n⚠️  SKIPPING CLAIMS ANALYSIS: Need at least 1 reference article, got {len(fetched_articles)}')
+            results['claims_analysis'] = {
+                'success': False,
+                'message': f'Need at least 1 reference article for claims analysis. Got {len(fetched_articles)} articles.'
+            }
+            results['target_article'] = {
+                'title': target_article_data.get('title', 'Unknown'),
+                'url': target_article_data.get('url', 'Unknown'),
+                'date': target_article_data.get('date', 'Unknown')
+            }
+        
+        # Step 6: Save to file if requested
         if save_to_file:
             import json
             
@@ -334,7 +490,7 @@ def search_and_fetch():
             
             # Generate filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            safe_query = query.replace(' ', '_').replace('/', '_')[:50]  # Sanitize query for filename
+            safe_query = base_query.replace(' ', '_').replace('/', '_').replace('\'', '')[:50]  # Sanitize query for filename
             filename = f"{output_dir}/search_results_{safe_query}_{timestamp}.json"
             
             # Save to file

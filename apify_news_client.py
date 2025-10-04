@@ -53,8 +53,8 @@ class ApifyNewsClient:
         print('Starting Apify actor run...')
         
         try:
-            # Run the Actor and wait for it to finish
-            run = self.client.actor(self.actor_id).call(input_data)
+            # Run the Actor and wait for it to finish - correct API usage
+            run = self.client.actor(self.actor_id).call(run_input=input_data)
 
             print('Actor run completed. Fetching results...')
 
@@ -146,8 +146,8 @@ class ApifyNewsClient:
         print('Starting Apify actor run...')
         
         try:
-            # Run the Actor and wait for it to finish
-            run = self.client.actor(self.actor_id).call(input_data)
+            # Run the Actor and wait for it to finish - correct API usage
+            run = self.client.actor(self.actor_id).call(run_input=input_data)
 
             print('Actor run completed. Fetching results...')
 

@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
 import os
-from apify_client import apify_news_client
+from apify_news_client import apify_news_client
+from newspaper_client import newspaper_client
 
 app = Flask(__name__)
 
@@ -94,6 +95,246 @@ def analyze_bias():
         return jsonify({
             'error': 'Internal Server Error',
             'message': 'Failed to fetch articles for bias analysis'
+        }), 500
+
+@app.route('/api/fetch-article', methods=['POST'])
+def fetch_article():
+    """Fetch and parse a single article from URL"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'URL parameter is required'
+            }), 400
+
+        url = data['url']
+        
+        # Validate URL first
+        validation = newspaper_client.validate_url(url)
+        if not validation['valid']:
+            return jsonify({
+                'error': 'Invalid URL',
+                'message': validation['error'],
+                'url': url
+            }), 400
+        
+        article_data = newspaper_client.fetch_article(url)
+        
+        if not article_data.get('success', False):
+            return jsonify({
+                'error': 'Article Fetch Failed',
+                'message': article_data.get('error', 'Unknown error'),
+                'url': url
+            }), 400
+        
+        return jsonify({
+            'success': True,
+            'data': article_data
+        })
+
+    except Exception as error:
+        print(f'Error fetching article: {error}')
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'Failed to fetch article'
+        }), 500
+
+@app.route('/api/fetch-articles', methods=['POST'])
+def fetch_articles():
+    """Fetch and parse multiple articles from URLs"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'urls' not in data:
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'URLs parameter is required'
+            }), 400
+
+        urls = data['urls']
+        
+        if not isinstance(urls, list):
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'URLs must be an array'
+            }), 400
+        
+        if len(urls) > 10:  # Limit to prevent abuse
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'Maximum 10 URLs allowed per request'
+            }), 400
+        
+        articles_data = newspaper_client.fetch_multiple_articles(urls)
+        
+        successful_articles = [article for article in articles_data if article.get('success', False)]
+        failed_articles = [article for article in articles_data if not article.get('success', False)]
+        
+        return jsonify({
+            'success': True,
+            'total_requested': len(urls),
+            'successful_count': len(successful_articles),
+            'failed_count': len(failed_articles),
+            'successful_articles': successful_articles,
+            'failed_articles': failed_articles
+        })
+
+    except Exception as error:
+        print(f'Error fetching articles: {error}')
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'Failed to fetch articles'
+        }), 500
+
+@app.route('/api/validate-url', methods=['POST'])
+def validate_url():
+    """Validate if a URL is accessible and contains article content"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'URL parameter is required'
+            }), 400
+
+        url = data['url']
+        validation_result = newspaper_client.validate_url(url)
+        
+        return jsonify(validation_result)
+
+    except Exception as error:
+        print(f'Error validating URL: {error}')
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'Failed to validate URL'
+        }), 500
+
+@app.route('/api/article-bias-analysis', methods=['POST'])
+def article_bias_analysis():
+    """Get article formatted for bias analysis"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'url' not in data:
+            return jsonify({
+                'error': 'Bad Request',
+                'message': 'URL parameter is required'
+            }), 400
+
+        url = data['url']
+        article_data = newspaper_client.get_article_for_bias_analysis(url)
+        
+        if not article_data.get('analysis_ready', False) and not article_data.get('success', False):
+            return jsonify({
+                'error': 'Article Processing Failed',
+                'message': article_data.get('error', 'Unknown error'),
+                'url': url
+            }), 400
+        
+        return jsonify({
+            'success': True,
+            'data': article_data
+        })
+
+    except Exception as error:
+        print(f'Error processing article for bias analysis: {error}')
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': 'Failed to process article for bias analysis'
+        }), 500
+
+@app.route('/api/search-and-fetch', methods=['POST'])
+def search_and_fetch():
+    """Search for articles using Apify and fetch full content using Newspaper3k"""
+    try:
+        data = request.get_json() if request.get_json() else {}
+        
+        # Get search query (default to the Sean Combs query if not provided)
+        query = data.get('query', 'Sean Combs Sentenced to More Than 4 Years in Prison After Apologizing for \'Sick\' Conduct')
+        max_results = data.get('maxResults', 10)
+        max_articles_to_fetch = data.get('maxArticlesToFetch', 5)  # Limit how many to fetch with Newspaper3k
+        
+        print(f"Searching for: {query}")
+        
+        # Step 1: Search using Apify
+        search_params = {
+            'queries': query,
+            'resultsPerPage': max_results,
+            'maxPagesPerQuery': 1
+        }
+        
+        apify_results = apify_news_client.run_actor_sync(search_params)
+        
+        if not apify_results or len(apify_results) == 0:
+            return jsonify({
+                'success': False,
+                'message': 'No search results found',
+                'query': query
+            }), 404
+        
+        print(f"Found {len(apify_results)} search results")
+        
+        # Step 2: Extract URLs from search results
+        urls = []
+        for result in apify_results:
+            # Apify returns results with organic results
+            if 'organicResults' in result:
+                for organic in result['organicResults'][:max_articles_to_fetch]:
+                    if 'url' in organic:
+                        urls.append(organic['url'])
+        
+        if not urls:
+            return jsonify({
+                'success': False,
+                'message': 'No URLs found in search results',
+                'query': query,
+                'search_results': apify_results
+            }), 400
+        
+        print(f"Extracted {len(urls)} URLs to fetch")
+        
+        # Step 3: Fetch articles using Newspaper3k
+        fetched_articles = []
+        failed_articles = []
+        
+        for url in urls:
+            print(f"Fetching article from: {url}")
+            article_data = newspaper_client.fetch_article(url)
+            
+            if article_data.get('success', False):
+                fetched_articles.append(article_data)
+            else:
+                failed_articles.append(article_data)
+        
+        # Step 4: Return combined results
+        return jsonify({
+            'success': True,
+            'query': query,
+            'search_results_count': len(apify_results),
+            'urls_extracted': len(urls),
+            'articles_fetched': len(fetched_articles),
+            'articles_failed': len(failed_articles),
+            'articles': fetched_articles,
+            'failed': failed_articles,
+            'summary': {
+                'query': query,
+                'total_search_results': len(apify_results),
+                'urls_found': len(urls),
+                'successfully_fetched': len(fetched_articles),
+                'failed_to_fetch': len(failed_articles)
+            }
+        })
+
+    except Exception as error:
+        print(f'Error in search and fetch: {error}')
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Internal Server Error',
+            'message': str(error)
         }), 500
 
 @app.errorhandler(404)

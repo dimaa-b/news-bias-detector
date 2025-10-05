@@ -365,6 +365,41 @@ REFERENCES_JSON:
             }
 
 
+    def _create_smart_chunks(self, sentences: List[str], max_chars: int = 800) -> List[List[tuple]]:
+        """
+        Split sentences into chunks with max character limit while preserving full sentences
+        
+        Args:
+            sentences: List of sentences to chunk
+            max_chars: Maximum characters per chunk (default 800)
+            
+        Returns:
+            List of chunks, where each chunk is a list of (index, sentence) tuples
+        """
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for idx, sentence in enumerate(sentences):
+            sentence_length = len(sentence)
+            
+            # If adding this sentence would exceed the limit and we have sentences in current chunk
+            if current_length + sentence_length > max_chars and current_chunk:
+                # Save current chunk and start new one
+                chunks.append(current_chunk)
+                current_chunk = [(idx, sentence)]
+                current_length = sentence_length
+            else:
+                # Add sentence to current chunk
+                current_chunk.append((idx, sentence))
+                current_length += sentence_length + 1  # +1 for space/newline
+        
+        # Don't forget the last chunk
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+
     def analyze_claims_streaming(self, target_title: str, target_text: str, references: List[Dict[str, Any]], target_date: str = "Unknown"):
         """
         Analyze claims and rhetoric in an article with streaming results sentence by sentence
@@ -398,23 +433,30 @@ REFERENCES_JSON:
                 "text": ref.get('text', '')
             })
         
-        # Process sentences in batches for efficiency
-        batch_size = 5
+        # Create smart chunks (max 800 chars, full sentences only)
+        chunks = self._create_smart_chunks(sentences, max_chars=800)
         all_sentence_reviews = []
         
-        for batch_start in range(0, total_sentences, batch_size):
-            batch_end = min(batch_start + batch_size, total_sentences)
-            batch_sentences = sentences[batch_start:batch_end]
+        print(f'📊 Smart Chunking: Split {total_sentences} sentences into {len(chunks)} chunks')
+        
+        for chunk_idx, chunk in enumerate(chunks):
+            # Extract sentence indices and texts
+            chunk_start_idx = chunk[0][0]
+            chunk_end_idx = chunk[-1][0]
+            chunk_sentences = [sent for idx, sent in chunk]
             
-            # Create prompt for this batch
-            sentences_text = "\n".join([f"{i+batch_start+1}. {s}" for i, s in enumerate(batch_sentences)])
+            # Create prompt for this chunk
+            sentences_text = "\n".join([f"{idx + 1}. {sent}" for idx, sent in chunk])
+            
+            chunk_char_count = sum(len(sent) for _, sent in chunk)
+            print(f'  Chunk {chunk_idx + 1}/{len(chunks)}: {len(chunk)} sentences, ~{chunk_char_count} chars')
             
             prompt = f"""You are analyzing sentences from a news article for factual accuracy and bias.
 
 TARGET ARTICLE: {target_title}
 DATE: {target_date}
 
-SENTENCES TO ANALYZE (indices {batch_start + 1} to {batch_end}):
+SENTENCES TO ANALYZE (indices {chunk_start_idx + 1} to {chunk_end_idx + 1}):
 {sentences_text}
 
 REFERENCES (use ONLY these for verification):
@@ -434,7 +476,7 @@ For each sentence, provide:
 Return ONLY valid JSON array of sentence reviews:
 [
   {{
-    "index": {batch_start + 1},
+    "index": {chunk_start_idx + 1},
     "sentence": "...",
     "types": [...],
     "verdict": "...",
@@ -447,7 +489,7 @@ Return ONLY valid JSON array of sentence reviews:
 ]"""
 
             try:
-                # Generate analysis for this batch
+                # Generate analysis for this chunk
                 response = self.generate_text(prompt, temperature=0.2, max_output_tokens=8192)
                 
                 if response['success']:
@@ -462,11 +504,11 @@ Return ONLY valid JSON array of sentence reviews:
                                 text = text[4:].strip()
                     
                     try:
-                        batch_reviews = json.loads(text)
-                        all_sentence_reviews.extend(batch_reviews)
+                        chunk_reviews = json.loads(text)
+                        all_sentence_reviews.extend(chunk_reviews)
                         
                         # Yield each sentence review
-                        for review in batch_reviews:
+                        for review in chunk_reviews:
                             yield {
                                 'type': 'sentence_review',
                                 'data': review,
@@ -476,27 +518,19 @@ Return ONLY valid JSON array of sentence reviews:
                                 }
                             }
                     except json.JSONDecodeError as e:
-                        yield {
-                            'type': 'error',
-                            'message': f'Failed to parse batch {batch_start + 1}-{batch_end}: {str(e)}',
-                            'batch_start': batch_start + 1,
-                            'batch_end': batch_end
-                        }
+                        # Print error to console but continue processing
+                        print(f'⚠️  Gemini Error: Failed to parse chunk {chunk_idx + 1}/{len(chunks)} (sentences {chunk_start_idx + 1}-{chunk_end_idx + 1}): {str(e)}')
+                        print(f'    Response text: {text[:200]}...')
+                        continue
                 else:
-                    yield {
-                        'type': 'error',
-                        'message': f'Failed to analyze batch {batch_start + 1}-{batch_end}: {response.get("error")}',
-                        'batch_start': batch_start + 1,
-                        'batch_end': batch_end
-                    }
+                    # Print error to console but continue processing
+                    print(f'⚠️  Gemini Error: Failed to analyze chunk {chunk_idx + 1}/{len(chunks)} (sentences {chunk_start_idx + 1}-{chunk_end_idx + 1}): {response.get("error")}')
+                    continue
                     
             except Exception as error:
-                yield {
-                    'type': 'error',
-                    'message': f'Error analyzing batch {batch_start + 1}-{batch_end}: {str(error)}',
-                    'batch_start': batch_start + 1,
-                    'batch_end': batch_end
-                }
+                # Print error to console but continue processing
+                print(f'⚠️  Gemini Error: Error analyzing chunk {chunk_idx + 1}/{len(chunks)} (sentences {chunk_start_idx + 1}-{chunk_end_idx + 1}): {str(error)}')
+                continue
         
         # Generate final summary
         if all_sentence_reviews:

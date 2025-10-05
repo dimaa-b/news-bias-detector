@@ -665,8 +665,6 @@ def internal_error(error):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
-    print(f'🚀 Server is running on http://localhost:{port}')
-    print(f'📊 Health check available at http://localhost:{port}/health')
-    print(f'🔗 API status at http://localhost:{port}/api/status')
+    print(f'Server is running on http://localhost:{port}')
     
     app.run(host='0.0.0.0', port=port, debug=True)

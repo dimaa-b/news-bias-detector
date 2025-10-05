@@ -72,6 +72,20 @@ async function saveState() {
 // Initialize - load saved state
 loadSavedState();
 
+// Helper function to send messages to content script
+async function sendToContentScript(message) {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) {
+      chrome.tabs.sendMessage(tab.id, message).catch(err => {
+        console.warn('Could not send message to content script:', err);
+      });
+    }
+  } catch (err) {
+    console.warn('Error sending message:', err);
+  }
+}
+
 // Save API URL when changed
 apiUrlInput.addEventListener('change', () => {
   chrome.storage.sync.set({ apiUrl: apiUrlInput.value });
@@ -165,6 +179,7 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
   let sentenceReviews = [];
   let finalAnalysis = null;
   let buffer = '';
+  let verdictCounts = {};
   
   while (true) {
     const { done, value } = await reader.read();
@@ -188,6 +203,7 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             
           case 'progress':
             updateStatus(`${data.message} (${data.current}/${data.total})`, 'info');
+            sendToContentScript({ type: 'progress', current: data.current, total: data.total });
             break;
             
           case 'warning':
@@ -202,11 +218,16 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             updateStatus(`Analyzing ${data.total_sentences} sentences...`, 'info');
             resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Analyzing sentences...</p></div>';
             resultsDiv.style.display = 'block';
+            sendToContentScript({ type: 'analysis_start', total_sentences: data.total_sentences });
             break;
             
           case 'sentence_review':
             sentenceReviews.push(data.data);
             updateStatus(`Analyzed sentence ${data.progress.current}/${data.progress.total}`, 'info');
+            
+            // Update verdict counts
+            const verdict = data.data.verdict;
+            verdictCounts[verdict] = (verdictCounts[verdict] || 0) + 1;
             
             // Highlight sentence immediately
             await chrome.scripting.executeScript({
@@ -217,6 +238,13 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             
             // Update progress display
             displayProgressResults(sentenceReviews, data.progress.total);
+            
+            // Send to panel
+            sendToContentScript({ 
+              type: 'sentence_review', 
+              progress: data.progress,
+              verdictCounts: verdictCounts
+            });
             
             // Save state periodically (every 5 sentences)
             if (sentenceReviews.length % 5 === 0) {
@@ -235,6 +263,9 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             updateStatus('Analysis complete! Sentences highlighted on page.', 'success');
             legendDiv.style.display = 'block';
             
+            // Send to panel
+            sendToContentScript({ type: 'analysis_complete', data: data.data });
+            
             // Save final state
             currentState.sentenceReviews = sentenceReviews;
             await saveState();
@@ -245,6 +276,7 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             break;
             
           case 'error':
+            sendToContentScript({ type: 'error', message: data.message });
             throw new Error(data.message);
         }
       }
@@ -327,6 +359,9 @@ function updateStatus(message, type) {
   
   // Update state
   currentState.status = { message, type };
+  
+  // Send to content script
+  sendToContentScript({ type: 'status', message, statusType: type });
 }
 
 // Display progress results during streaming

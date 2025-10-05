@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, Response, stream_with_context
+from flask_cors import CORS
 from datetime import datetime
 import os
 import json
@@ -7,6 +8,7 @@ from newspaper_client import newspaper_client
 from gemini_client import analyze_claims_simple, gemini_client
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.route('/', methods=['GET'])
 def home():

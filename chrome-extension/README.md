@@ -14,6 +14,9 @@ A Chrome extension that analyzes news articles for bias and misleading claims us
   - ⚪ **Gray**: No factual claim
 - 📊 **Detailed Analysis**: Shows misleading risk score, verdict counts, and top issues
 - 💡 **Interactive**: Hover over highlights to see explanations and confidence scores
+- 🎯 **Floating Panel**: Always-visible status panel in top-right corner with real-time updates
+- ⚡ **Streaming Analysis**: Sentence-by-sentence analysis with live progress updates
+- 💾 **State Persistence**: Analysis results saved per-page and restored automatically
 
 ## Installation
 

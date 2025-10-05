@@ -10,19 +10,27 @@
   ],
   "host_permissions": [
     "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*",
     "<all_urls>"
   ],
-  "action": {
-    "default_popup": "popup.html"
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://localhost:3000 http://127.0.0.1:3000"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "css": ["content.css"]
+      "css": ["content.css"],
+      "run_at": "document_end"
     }
   ],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

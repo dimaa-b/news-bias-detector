@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from datetime import datetime
 import os
+import json
 from apify_news_client import apify_news_client
 from newspaper_client import newspaper_client
-from gemini_client import analyze_claims_simple
+from gemini_client import analyze_claims_simple, gemini_client
 
 app = Flask(__name__)
 
@@ -246,6 +247,139 @@ def article_bias_analysis():
             'error': 'Internal Server Error',
             'message': 'Failed to process article for bias analysis'
         }), 500
+
+@app.route('/api/search-and-fetch-stream', methods=['POST'])
+def search_and_fetch_stream():
+    """Search for articles and stream analysis results sentence by sentence"""
+    def generate():
+        try:
+            data = request.get_json() if request.get_json() else {}
+            
+            # Send initial status
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Starting search and fetch...'})}\n\n"
+            
+            # Get parameters
+            target_article_data = data.get('targetArticle')
+            base_query = data.get('query', 'Sean Combs Sentenced to More Than 4 Years in Prison After Apologizing for \'Sick\' Conduct')
+            max_results = data.get('maxResults', 10)
+            max_articles_to_fetch = data.get('maxArticlesToFetch', 10)
+            use_reputable_sources = data.get('useReputableSources', True)
+            
+            # Load reputable sources
+            query = base_query
+            if use_reputable_sources:
+                try:
+                    with open('reputable_sources.json', 'r') as f:
+                        sources_data = json.load(f)
+                        websites = sources_data.get('websites', [])
+                    
+                    if websites:
+                        site_query = ' OR '.join([f'site:{site}' for site in websites])
+                        query = f'{base_query} {site_query}'
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'warning', 'message': f'Could not load reputable sources: {str(e)}'})}\n\n"
+            
+            # Step 1: Search using Apify
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Searching for articles...'})}\n\n"
+            
+            search_params = {
+                'queries': query,
+                'resultsPerPage': max_results,
+                'maxPagesPerQuery': 1
+            }
+            
+            apify_results = apify_news_client.run_actor_sync(search_params)
+            
+            if not apify_results or len(apify_results) == 0:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No search results found'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Found {len(apify_results)} search results'})}\n\n"
+            
+            # Step 2: Extract URLs
+            urls = []
+            for result in apify_results:
+                if 'organicResults' in result:
+                    for organic in result['organicResults'][:max_articles_to_fetch]:
+                        if 'url' in organic:
+                            urls.append(organic['url'])
+            
+            if not urls:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No URLs found in search results'})}\n\n"
+                return
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Extracted {len(urls)} URLs'})}\n\n"
+            
+            # Step 3: Fetch articles
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Fetching article contents...'})}\n\n"
+            
+            fetched_articles = []
+            failed_articles = []
+            
+            for i, url in enumerate(urls):
+                yield f"data: {json.dumps({'type': 'progress', 'current': i + 1, 'total': len(urls), 'message': f'Fetching article {i + 1}/{len(urls)}'})}\n\n"
+                
+                article_data = newspaper_client.fetch_article(url)
+                
+                if article_data.get('success', False):
+                    fetched_articles.append(article_data)
+                else:
+                    failed_articles.append(article_data)
+            
+            yield f"data: {json.dumps({'type': 'status', 'message': f'Successfully fetched {len(fetched_articles)} articles'})}\n\n"
+            
+            # Send summary of fetched articles
+            summary_data = {
+                'type': 'fetch_summary',
+                'data': {
+                    'original_query': base_query,
+                    'google_search_query': query,
+                    'used_reputable_sources': use_reputable_sources,
+                    'search_results_count': len(apify_results),
+                    'urls_extracted': len(urls),
+                    'articles_fetched': len(fetched_articles),
+                    'articles_failed': len(failed_articles)
+                }
+            }
+            yield f"data: {json.dumps(summary_data)}\n\n"
+            
+            # Step 4: Analyze claims with streaming
+            if target_article_data and len(fetched_articles) >= 1:
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Starting claims analysis...'})}\n\n"
+                
+                target_title = target_article_data.get('title', 'Untitled')
+                target_text = target_article_data.get('text', '')
+                target_date = target_article_data.get('date', 'Unknown')
+                target_url = target_article_data.get('url', 'Unknown')
+                
+                # Prepare references
+                references = []
+                for ref in fetched_articles:
+                    references.append({
+                        'title': ref.get('title', 'Untitled'),
+                        'text': ref.get('text', ''),
+                        'date': ref.get('publish_date'),
+                        'url': ref.get('url')
+                    })
+                
+                # Use streaming analysis
+                for chunk in gemini_client.analyze_claims_streaming(target_title, target_text, references, target_date):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Analysis complete'})}\n\n"
+            else:
+                if not target_article_data:
+                    yield f"data: {json.dumps({'type': 'warning', 'message': 'No target article provided'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'warning', 'message': f'Need at least 1 reference article, got {len(fetched_articles)}'})}\n\n"
+            
+            # Send completion event
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            
+        except Exception as error:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(error)})}\n\n"
+    
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
 @app.route('/api/search-and-fetch', methods=['POST'])
 def search_and_fetch():

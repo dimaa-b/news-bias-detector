@@ -365,6 +365,200 @@ REFERENCES_JSON:
             }
 
 
+    def analyze_claims_streaming(self, target_title: str, target_text: str, references: List[Dict[str, Any]], target_date: str = "Unknown"):
+        """
+        Analyze claims and rhetoric in an article with streaming results sentence by sentence
+        
+        Yields:
+            dict: Streaming chunks with analysis progress
+        """
+        # Split target text into sentences
+        import re
+        # Simple sentence splitter (you might want a more sophisticated one)
+        sentences = re.split(r'(?<=[.!?])\s+', target_text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        total_sentences = len(sentences)
+        
+        yield {
+            'type': 'analysis_start',
+            'total_sentences': total_sentences,
+            'target_title': target_title,
+            'target_date': target_date
+        }
+        
+        # Prepare references JSON
+        references_json = []
+        for i, ref in enumerate(references, start=1):
+            references_json.append({
+                "ref_id": f"R{i}",
+                "title": ref.get('title', 'Untitled'),
+                "date": ref.get('date', 'Unknown'),
+                "url": ref.get('url', 'Unknown'),
+                "text": ref.get('text', '')
+            })
+        
+        # Process sentences in batches for efficiency
+        batch_size = 5
+        all_sentence_reviews = []
+        
+        for batch_start in range(0, total_sentences, batch_size):
+            batch_end = min(batch_start + batch_size, total_sentences)
+            batch_sentences = sentences[batch_start:batch_end]
+            
+            # Create prompt for this batch
+            sentences_text = "\n".join([f"{i+batch_start+1}. {s}" for i, s in enumerate(batch_sentences)])
+            
+            prompt = f"""You are analyzing sentences from a news article for factual accuracy and bias.
+
+TARGET ARTICLE: {target_title}
+DATE: {target_date}
+
+SENTENCES TO ANALYZE (indices {batch_start + 1} to {batch_end}):
+{sentences_text}
+
+REFERENCES (use ONLY these for verification):
+{json.dumps(references_json, indent=2)}
+
+For each sentence, provide:
+- index: sentence number
+- sentence: the original text
+- types: array of ["Factual claim" | "Opinion/Value" | "Reported speech/Quote" | "Rhetorical/Framing"]
+- verdict: "Supported" | "Contradicted" | "Unverifiable" | "Misleading by context" | "No factual claim"
+- issues: array of potential issues like ["Cherry-picking", "Missing context", "Loaded language", etc.]
+- claim_extracted: succinct restatement or null
+- evidence: array of {{ref_id, locator, quote (≤20 words), alignment}}
+- explanation: ≤40 words
+- confidence: 0.0-1.0
+
+Return ONLY valid JSON array of sentence reviews:
+[
+  {{
+    "index": {batch_start + 1},
+    "sentence": "...",
+    "types": [...],
+    "verdict": "...",
+    "issues": [...],
+    "claim_extracted": "..." or null,
+    "evidence": [...],
+    "explanation": "...",
+    "confidence": 0.0
+  }}
+]"""
+
+            try:
+                # Generate analysis for this batch
+                response = self.generate_text(prompt, temperature=0.2, max_output_tokens=8192)
+                
+                if response['success']:
+                    text = response['text'].strip()
+                    
+                    # Extract JSON if wrapped in markdown
+                    if text.startswith('```'):
+                        parts = text.split('```')
+                        if len(parts) >= 2:
+                            text = parts[1]
+                            if text.startswith('json'):
+                                text = text[4:].strip()
+                    
+                    try:
+                        batch_reviews = json.loads(text)
+                        all_sentence_reviews.extend(batch_reviews)
+                        
+                        # Yield each sentence review
+                        for review in batch_reviews:
+                            yield {
+                                'type': 'sentence_review',
+                                'data': review,
+                                'progress': {
+                                    'current': review['index'],
+                                    'total': total_sentences
+                                }
+                            }
+                    except json.JSONDecodeError as e:
+                        yield {
+                            'type': 'error',
+                            'message': f'Failed to parse batch {batch_start + 1}-{batch_end}: {str(e)}',
+                            'batch_start': batch_start + 1,
+                            'batch_end': batch_end
+                        }
+                else:
+                    yield {
+                        'type': 'error',
+                        'message': f'Failed to analyze batch {batch_start + 1}-{batch_end}: {response.get("error")}',
+                        'batch_start': batch_start + 1,
+                        'batch_end': batch_end
+                    }
+                    
+            except Exception as error:
+                yield {
+                    'type': 'error',
+                    'message': f'Error analyzing batch {batch_start + 1}-{batch_end}: {str(error)}',
+                    'batch_start': batch_start + 1,
+                    'batch_end': batch_end
+                }
+        
+        # Generate final summary
+        if all_sentence_reviews:
+            yield {
+                'type': 'generating_summary',
+                'message': 'Generating overall assessment...'
+            }
+            
+            # Count verdicts
+            verdict_counts = {}
+            for review in all_sentence_reviews:
+                verdict = review.get('verdict', 'Unknown')
+                verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+            
+            # Calculate risk score (simple heuristic)
+            total_reviews = len(all_sentence_reviews)
+            risk_score = 0
+            if total_reviews > 0:
+                contradicted = verdict_counts.get('Contradicted', 0)
+                misleading = verdict_counts.get('Misleading by context', 0)
+                risk_score = min(100, int(((contradicted * 2 + misleading * 1.5) / total_reviews) * 100))
+            
+            # Generate summary using Gemini
+            summary_prompt = f"""Based on this sentence-by-sentence analysis, provide a 3-4 sentence summary of the article's accuracy and any patterns of bias or misleading information.
+
+Article: {target_title}
+Analyzed: {total_reviews} sentences
+Verdict counts: {json.dumps(verdict_counts)}
+
+Provide a concise, plain-language summary."""
+
+            summary_response = self.generate_text(summary_prompt, temperature=0.3, max_output_tokens=512)
+            summary_text = summary_response.get('text', 'Analysis complete.') if summary_response['success'] else 'Analysis complete.'
+            
+            # Send final summary
+            yield {
+                'type': 'analysis_complete',
+                'data': {
+                    'pattern_summary': {
+                        'counts_by_verdict': verdict_counts,
+                        'total_sentences': total_reviews
+                    },
+                    'overall_assessment': {
+                        'misleading_risk_score': risk_score,
+                        'summary': summary_text
+                    },
+                    'document_metadata': {
+                        'target_title': target_title,
+                        'target_date': target_date,
+                        'references_used': [
+                            {
+                                'ref_id': ref['ref_id'],
+                                'title': ref['title'],
+                                'date': ref['date'],
+                                'url': ref['url']
+                            } for ref in references_json
+                        ]
+                    }
+                }
+            }
+
+
 # Create a global instance for easy import
 gemini_client = GeminiClient()
 

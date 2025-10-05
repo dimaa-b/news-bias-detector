@@ -3,16 +3,74 @@
 const statusDiv = document.getElementById('status');
 const analyzeBtn = document.getElementById('analyzeBtn');
 const clearBtn = document.getElementById('clearBtn');
+const clearDataBtn = document.getElementById('clearDataBtn');
 const resultsDiv = document.getElementById('results');
 const legendDiv = document.getElementById('legend');
 const apiUrlInput = document.getElementById('apiUrl');
 
-// Load saved API URL
-chrome.storage.sync.get(['apiUrl'], (result) => {
-  if (result.apiUrl) {
-    apiUrlInput.value = result.apiUrl;
-  }
-});
+// State management
+let currentState = {
+  hasAnalysis: false,
+  currentUrl: null,
+  analysisData: null,
+  sentenceReviews: [],
+  status: { message: 'Ready to analyze article', type: 'info' }
+};
+
+// Load saved state on popup open
+async function loadSavedState() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const currentUrl = tab.url;
+  
+  chrome.storage.local.get([`analysis_${currentUrl}`], (result) => {
+    const savedState = result[`analysis_${currentUrl}`];
+    
+    if (savedState) {
+      currentState = savedState;
+      
+      // Restore UI state
+      if (currentState.status) {
+        updateStatus(currentState.status.message + ' (restored)', currentState.status.type);
+      }
+      
+      if (currentState.hasAnalysis && currentState.analysisData) {
+        displayFinalResults(currentState.analysisData);
+        legendDiv.style.display = 'block';
+        
+        // Re-apply highlights to the page
+        if (currentState.sentenceReviews && currentState.sentenceReviews.length > 0) {
+          chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: highlightSentences,
+            args: [currentState.sentenceReviews]
+          }).catch(err => console.warn('Could not restore highlights:', err));
+          
+          console.log(`Restored ${currentState.sentenceReviews.length} sentence reviews`);
+        }
+      }
+    }
+  });
+  
+  // Also load API URL from sync storage
+  chrome.storage.sync.get(['apiUrl'], (result) => {
+    if (result.apiUrl) {
+      apiUrlInput.value = result.apiUrl;
+    }
+  });
+}
+
+// Save current state
+async function saveState() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const currentUrl = tab.url;
+  
+  chrome.storage.local.set({
+    [`analysis_${currentUrl}`]: currentState
+  });
+}
+
+// Initialize - load saved state
+loadSavedState();
 
 // Save API URL when changed
 apiUrlInput.addEventListener('change', () => {
@@ -72,6 +130,10 @@ analyzeBtn.addEventListener('click', async () => {
   } catch (error) {
     console.error('Analysis error:', error);
     updateStatus(`Error: ${error.message}`, 'error');
+    
+    // Save error state
+    currentState.status = { message: `Error: ${error.message}`, type: 'error' };
+    await saveState();
   } finally {
     analyzeBtn.disabled = false;
   }
@@ -155,6 +217,12 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             
             // Update progress display
             displayProgressResults(sentenceReviews, data.progress.total);
+            
+            // Save state periodically (every 5 sentences)
+            if (sentenceReviews.length % 5 === 0) {
+              currentState.sentenceReviews = sentenceReviews;
+              await saveState();
+            }
             break;
             
           case 'generating_summary':
@@ -166,6 +234,10 @@ async function analyzeWithStreaming(apiUrl, articleData, tabId) {
             displayFinalResults(finalAnalysis);
             updateStatus('Analysis complete! Sentences highlighted on page.', 'success');
             legendDiv.style.display = 'block';
+            
+            // Save final state
+            currentState.sentenceReviews = sentenceReviews;
+            await saveState();
             break;
             
           case 'complete':
@@ -197,8 +269,54 @@ clearBtn.addEventListener('click', async () => {
     resultsDiv.style.display = 'none';
     legendDiv.style.display = 'none';
     updateStatus('Highlights cleared', 'info');
+    
+    // Clear saved state
+    currentState = {
+      hasAnalysis: false,
+      currentUrl: tab.url,
+      analysisData: null,
+      sentenceReviews: [],
+      status: { message: 'Highlights cleared', type: 'info' }
+    };
+    await saveState();
+    
   } catch (error) {
     updateStatus(`Error: ${error.message}`, 'error');
+  }
+});
+
+// Clear all saved data button
+clearDataBtn.addEventListener('click', async () => {
+  if (confirm('This will clear all saved analysis data for all pages. Continue?')) {
+    try {
+      // Clear all local storage
+      chrome.storage.local.clear(() => {
+        updateStatus('All saved data cleared', 'info');
+        resultsDiv.style.display = 'none';
+        legendDiv.style.display = 'none';
+        
+        // Reset current state
+        currentState = {
+          hasAnalysis: false,
+          currentUrl: null,
+          analysisData: null,
+          sentenceReviews: [],
+          status: { message: 'All saved data cleared', type: 'info' }
+        };
+        
+        console.log('All saved analysis data has been cleared');
+      });
+      
+      // Also clear highlights on current page
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: clearHighlights
+      }).catch(err => console.warn('Could not clear highlights:', err));
+      
+    } catch (error) {
+      updateStatus(`Error: ${error.message}`, 'error');
+    }
   }
 });
 
@@ -206,6 +324,9 @@ clearBtn.addEventListener('click', async () => {
 function updateStatus(message, type) {
   statusDiv.textContent = message;
   statusDiv.className = `status ${type}`;
+  
+  // Update state
+  currentState.status = { message, type };
 }
 
 // Display progress results during streaming
@@ -262,6 +383,10 @@ function displayFinalResults(analysisData) {
   
   resultsDiv.innerHTML = html;
   resultsDiv.style.display = 'block';
+  
+  // Update state
+  currentState.hasAnalysis = true;
+  currentState.analysisData = analysisData;
 }
 
 // Display analysis results (legacy, keeping for compatibility)

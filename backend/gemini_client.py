@@ -14,7 +14,7 @@ class GeminiClient:
     A client for interacting with Google's Gemini API for text generation and analysis
     """
     
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-2.5-pro"):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-flash-latest"):
         """
         Initialize the Gemini client
         

@@ -61,53 +61,13 @@ analyzeBtn.addEventListener('click', async () => {
     
     updateStatus(`Analyzing article: "${articleData.title.substring(0, 40)}..."`, 'info');
     
-    // Send to backend
-    const apiUrl = apiUrlInput.value;
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        targetArticle: articleData,
-        query: articleData.title || 'news article',
-        maxResults: 5,
-        maxArticlesToFetch: 5,
-        useReputableSources: true,
-        saveToFile: false
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status} ${response.statusText}`);
+    // Get API URL and ensure it's the streaming endpoint
+    let apiUrl = apiUrlInput.value;
+    if (!apiUrl.includes('search-and-fetch-stream')) {
+      apiUrl = apiUrl.replace('/api/search-and-fetch', '/api/search-and-fetch-stream');
     }
     
-    const data = await response.json();
-    
-    if (!data.success) {
-      throw new Error(data.message || 'Analysis failed');
-    }
-    
-    // Check if claims analysis was successful
-    if (!data.claims_analysis || !data.claims_analysis.success) {
-      const errorMsg = data.claims_analysis?.message || 'Claims analysis not available';
-      throw new Error(errorMsg);
-    }
-    
-    const analysis = data.claims_analysis.analysis;
-    
-    // Highlight sentences in the page
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: highlightSentences,
-      args: [analysis.sentence_reviews]
-    });
-    
-    // Display results
-    displayResults(analysis);
-    
-    updateStatus('Analysis complete! Sentences highlighted on page.', 'success');
-    legendDiv.style.display = 'block';
+    await analyzeWithStreaming(apiUrl, articleData, tab.id);
     
   } catch (error) {
     console.error('Analysis error:', error);
@@ -116,6 +76,113 @@ analyzeBtn.addEventListener('click', async () => {
     analyzeBtn.disabled = false;
   }
 });
+
+// Streaming analysis function
+async function analyzeWithStreaming(apiUrl, articleData, tabId) {
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      targetArticle: articleData,
+      query: articleData.title || 'news article',
+      maxResults: 5,
+      maxArticlesToFetch: 5,
+      useReputableSources: true
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`);
+  }
+  
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  
+  let sentenceReviews = [];
+  let finalAnalysis = null;
+  let buffer = '';
+  
+  while (true) {
+    const { done, value } = await reader.read();
+    
+    if (done) break;
+    
+    buffer += decoder.decode(value, { stream: true });
+    
+    // Process complete SSE messages
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || ''; // Keep incomplete line in buffer
+    
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = JSON.parse(line.substring(6));
+        
+        switch (data.type) {
+          case 'status':
+            updateStatus(data.message, 'info');
+            break;
+            
+          case 'progress':
+            updateStatus(`${data.message} (${data.current}/${data.total})`, 'info');
+            break;
+            
+          case 'warning':
+            console.warn(data.message);
+            break;
+            
+          case 'fetch_summary':
+            updateStatus(`Fetched ${data.data.articles_fetched} articles, starting analysis...`, 'info');
+            break;
+            
+          case 'analysis_start':
+            updateStatus(`Analyzing ${data.total_sentences} sentences...`, 'info');
+            resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div><p>Analyzing sentences...</p></div>';
+            resultsDiv.style.display = 'block';
+            break;
+            
+          case 'sentence_review':
+            sentenceReviews.push(data.data);
+            updateStatus(`Analyzed sentence ${data.progress.current}/${data.progress.total}`, 'info');
+            
+            // Highlight sentence immediately
+            await chrome.scripting.executeScript({
+              target: { tabId: tabId },
+              func: highlightSingleSentence,
+              args: [data.data]
+            });
+            
+            // Update progress display
+            displayProgressResults(sentenceReviews, data.progress.total);
+            break;
+            
+          case 'generating_summary':
+            updateStatus(data.message, 'info');
+            break;
+            
+          case 'analysis_complete':
+            finalAnalysis = data.data;
+            displayFinalResults(finalAnalysis);
+            updateStatus('Analysis complete! Sentences highlighted on page.', 'success');
+            legendDiv.style.display = 'block';
+            break;
+            
+          case 'complete':
+            console.log('Streaming complete');
+            break;
+            
+          case 'error':
+            throw new Error(data.message);
+        }
+      }
+    }
+  }
+  
+  if (!finalAnalysis) {
+    throw new Error('Analysis did not complete successfully');
+  }
+}
 
 // Clear highlights button
 clearBtn.addEventListener('click', async () => {
@@ -141,18 +208,45 @@ function updateStatus(message, type) {
   statusDiv.className = `status ${type}`;
 }
 
-// Display analysis results
-function displayResults(analysis) {
-  const assessment = analysis.overall_assessment;
-  const verdicts = analysis.pattern_summary.counts_by_verdict;
+// Display progress results during streaming
+function displayProgressResults(sentenceReviews, totalSentences) {
+  const verdictCounts = {};
+  
+  for (const review of sentenceReviews) {
+    const verdict = review.verdict;
+    verdictCounts[verdict] = (verdictCounts[verdict] || 0) + 1;
+  }
+  
+  let html = '<div class="progress-container">';
+  html += `<h3>Progress: ${sentenceReviews.length}/${totalSentences} sentences analyzed</h3>`;
+  
+  if (Object.keys(verdictCounts).length > 0) {
+    html += '<div class="result-item">';
+    html += `<div class="result-label">Verdicts so far:</div>`;
+    for (const [verdict, count] of Object.entries(verdictCounts)) {
+      const verdictClass = verdict.toLowerCase().replace(/ /g, '-');
+      html += `<span class="verdict-badge verdict-${verdictClass}">${verdict}: ${count}</span> `;
+    }
+    html += '</div>';
+  }
+  
+  html += '</div>';
+  
+  resultsDiv.innerHTML = html;
+}
+
+// Display final analysis results
+function displayFinalResults(analysisData) {
+  const assessment = analysisData.overall_assessment;
+  const verdicts = analysisData.pattern_summary.counts_by_verdict;
   
   let html = '<div class="result-item">';
   html += `<div class="result-label">Misleading Risk Score:</div>`;
-  html += `<div>${assessment.misleading_risk_score}/100</div>`;
+  html += `<div class="risk-score">${assessment.misleading_risk_score}/100</div>`;
   html += '</div>';
   
   html += '<div class="result-item">';
-  html += `<div class="result-label">Verdicts:</div>`;
+  html += `<div class="result-label">Final Verdicts:</div>`;
   for (const [verdict, count] of Object.entries(verdicts)) {
     if (count > 0) {
       const verdictClass = verdict.toLowerCase().replace(/ /g, '-');
@@ -166,18 +260,16 @@ function displayResults(analysis) {
   html += `<div style="margin-top: 5px; color: #666;">${assessment.summary}</div>`;
   html += '</div>';
   
-  if (analysis.pattern_summary.top_recurring_patterns.length > 0) {
-    html += '<div class="result-item">';
-    html += `<div class="result-label">Top Issues:</div>`;
-    html += '<ul style="margin: 5px 0; padding-left: 20px;">';
-    for (const pattern of analysis.pattern_summary.top_recurring_patterns.slice(0, 3)) {
-      html += `<li>${pattern.pattern} (${pattern.instances}x)</li>`;
-    }
-    html += '</ul></div>';
-  }
-  
   resultsDiv.innerHTML = html;
   resultsDiv.style.display = 'block';
+}
+
+// Display analysis results (legacy, keeping for compatibility)
+function displayResults(analysis) {
+  displayFinalResults({
+    overall_assessment: analysis.overall_assessment,
+    pattern_summary: analysis.pattern_summary
+  });
 }
 
 // Function to extract article content (runs in page context)
@@ -330,6 +422,80 @@ function highlightSentences(sentenceReviews) {
           }
           
           parent.replaceChild(fragment, textNode);
+          break;
+        }
+      }
+    }
+  }
+}
+
+// Function to highlight a single sentence (runs in page context)
+function highlightSingleSentence(review) {
+  const verdictColors = {
+    'Supported': 'rgba(76, 175, 80, 0.3)',
+    'Contradicted': 'rgba(244, 67, 54, 0.3)',
+    'Unverifiable': 'rgba(255, 152, 0, 0.3)',
+    'Misleading by context': 'rgba(255, 87, 34, 0.3)',
+    'No factual claim': 'rgba(158, 158, 158, 0.2)'
+  };
+  
+  const sentence = review.sentence.trim();
+  const data = {
+    verdict: review.verdict,
+    confidence: review.confidence,
+    explanation: review.explanation,
+    issues: review.issues || []
+  };
+  
+  // Find and highlight the sentence in the page
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT,
+    null,
+    false
+  );
+  
+  let node;
+  while (node = walker.nextNode()) {
+    const text = node.nodeValue;
+    
+    if (text.includes(sentence)) {
+      const parent = node.parentNode;
+      if (parent && !parent.classList.contains('bias-detector-highlight')) {
+        const parts = text.split(sentence);
+        
+        // Only process if we get exactly 2 parts (before and after)
+        if (parts.length === 2) {
+          const fragment = document.createDocumentFragment();
+          
+          // Add text before sentence
+          if (parts[0]) {
+            fragment.appendChild(document.createTextNode(parts[0]));
+          }
+          
+          // Create highlighted span
+          const span = document.createElement('span');
+          span.className = 'bias-detector-highlight';
+          span.style.backgroundColor = verdictColors[data.verdict] || 'rgba(255, 255, 0, 0.3)';
+          span.style.cursor = 'help';
+          span.style.borderRadius = '2px';
+          span.style.padding = '2px 0';
+          span.style.transition = 'background-color 0.3s ease';
+          span.textContent = sentence;
+          span.title = `${data.verdict} (${(data.confidence * 100).toFixed(0)}%)\n${data.explanation}${data.issues.length > 0 ? '\nIssues: ' + data.issues.join(', ') : ''}`;
+          
+          fragment.appendChild(span);
+          
+          // Add text after sentence
+          if (parts[1]) {
+            fragment.appendChild(document.createTextNode(parts[1]));
+          }
+          
+          parent.replaceChild(fragment, node);
+          
+          // Scroll to the highlighted sentence briefly
+          span.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          
           break;
         }
       }
